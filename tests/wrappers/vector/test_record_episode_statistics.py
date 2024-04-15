@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 
 import gymnasium as gym
@@ -35,7 +36,10 @@ def test_record_episode_statistics(num_envs, env_id="CartPole-v1", num_steps=100
     assert data_equivalence(wrapper_vector_obs, vector_wrapper_obs)
     assert data_equivalence(wrapper_vector_info, vector_wrapper_info)
 
-    for _ in range(num_steps):
+    # We keep step 0 empty, as the initial reset does not produce a done or reward signal
+    dones = np.zeros((num_steps + 1, num_envs), dtype=bool)
+    rewards = np.zeros((num_steps + 1, num_envs), dtype=float)
+    for t in range(1, num_steps + 1):
         action = wrapper_vector_env.action_space.sample()
         (
             wrapper_vector_obs,
@@ -56,16 +60,41 @@ def test_record_episode_statistics(num_envs, env_id="CartPole-v1", num_steps=100
         data_equivalence(wrapper_vector_reward, vector_wrapper_reward)
         data_equivalence(wrapper_vector_terminated, vector_wrapper_terminated)
         data_equivalence(wrapper_vector_truncated, vector_wrapper_truncated)
+        data_equivalence(wrapper_vector_info, vector_wrapper_info)
+
+        dones[t] = wrapper_vector_terminated | wrapper_vector_truncated
+        rewards[t] = wrapper_vector_reward
+
+        assert np.all(
+            wrapper_vector_info.get("_episode", np.zeros(num_envs, dtype=bool))
+            == dones[t]
+        )
 
         if "episode" in wrapper_vector_info:
-            assert "episode" in vector_wrapper_info
-
             wrapper_vector_time = wrapper_vector_info["episode"].pop("t")
             vector_wrapper_time = vector_wrapper_info["episode"].pop("t")
             assert wrapper_vector_time.shape == vector_wrapper_time.shape
             assert wrapper_vector_time.dtype == vector_wrapper_time.dtype
 
-        data_equivalence(wrapper_vector_info, vector_wrapper_info)
+            current_episode_mask = np.concatenate(
+                [
+                    ~np.flip(np.maximum.accumulate(np.flip(dones[:t], axis=0)), axis=0),
+                    np.ones((1, num_envs), dtype=bool),
+                ],
+                axis=0,
+            )
+            current_episode_length = np.sum(current_episode_mask, axis=0) - 1
+            current_episode_reward = np.sum(
+                (rewards[: t + 1] * current_episode_mask)[: t + 1], axis=0
+            )
+            assert np.all(
+                wrapper_vector_info["episode"]["l"][dones[t]]
+                == current_episode_length[dones[t]]
+            )
+            assert np.all(
+                wrapper_vector_info["episode"]["r"][dones[t]]
+                == current_episode_reward[dones[t]]
+            )
 
     wrapper_vector_env.close()
     vector_wrapper_env.close()
